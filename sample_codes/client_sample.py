@@ -1,6 +1,7 @@
 import socket
 
 #Set Socket
+# create new socket object
 client = socket.socket()
 port = 1234
 
