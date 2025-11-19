@@ -6,9 +6,10 @@ from tkinter import scrolledtext
 from crc import encode_message, decode_message, introduce_error
 
 PORT = 1234
-client_socket = None
-receive_thread = None
+client_socket = None    #TCP socket object for communication.
+receive_thread = None   #Background thread to receive messages.
 connected = False
+
 
 def gui_log(message):
     def append():
@@ -21,14 +22,20 @@ def gui_log(message):
     except Exception:
         append()
 
+
+#This function handles connecting to the chat server.
 def connect_to_server():
     global client_socket, receive_thread, connected
     if connected:
         gui_log('Already connected')
         return
+    
+    #Gets the Server IP, Port, and Username from the Tkinter entry fields.
     server_ip = entry_ip.get().strip()
     port_text = entry_port.get().strip()
     name = entry_name.get().strip()
+
+    #Validates that both IP and Name are provided.
     if not server_ip or not name:
         gui_log('Server IP and Name required')
         return
@@ -37,14 +44,17 @@ def connect_to_server():
     except ValueError:
         gui_log('Port must be a number')
         return
+    
+    #Creates a TCP socket (SOCK_STREAM) for IPv4 (AF_INET).
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
+    try: #connection to the server at the given IP and port
         client_socket.connect((server_ip, port))
     except Exception as e:
         gui_log(f'Connection failed: {e}')
         client_socket = None
         return
 
+    #Sends the client name to the server
     name_msg = encode_message(name)
     try:
         client_socket.send(name_msg.encode())
@@ -54,12 +64,16 @@ def connect_to_server():
         client_socket = None
         return
 
+    #Update connection state and start receiving thread
     connected = True
     gui_log(f'Connected to {server_ip}:{port} as {name}')
     set_connected_state(True)
+    #Creates a daemon thread to run receive_messages() in the background.
     receive_thread = threading.Thread(target=receive_messages, daemon=True)
     receive_thread.start()
 
+
+#This function handles disconnecting from the chat server.
 def disconnect_from_server():
     global client_socket, connected
     if not connected or client_socket is None:
@@ -67,7 +81,6 @@ def disconnect_from_server():
         return
     try:
         bye_msg = encode_message('[bye]')
-        bye_msg = introduce_error(bye_msg, error_prob=0.1)
         client_socket.send(bye_msg.encode())
     except:
         pass
@@ -80,8 +93,11 @@ def disconnect_from_server():
     gui_log('Disconnected')
     set_connected_state(False)
 
+
+#This function continuously listens for incoming messages from the server. 
 def receive_messages():
     global client_socket, connected
+    #The loop runs as long as the client is connected.
     while connected and client_socket:
         try:
             msg = client_socket.recv(4096).decode()
@@ -89,11 +105,13 @@ def receive_messages():
                 gui_log('Disconnected from server.')
                 break
             
+            #Checking for message validity
             text, ok = decode_message(msg)
-            if not ok:
+            if not ok: #CORRUPTED SERVER MESSAGE: gets error notification
                 gui_log('⚠️ Error detected in incoming message from server!')
                 continue
 
+            #If server signals shutdown, close the client.
             if text.lower().startswith('server is shutting down'):
                 gui_log('Server is shutting down...')
                 try:
@@ -101,39 +119,51 @@ def receive_messages():
                 except Exception:
                     pass
                 break
+
+            #VALID: Display the message in the client GUI. 
             gui_log(text)
         except Exception:
             break
-    try:
+    try: #Ensures the socket is closed when the thread ends.
         if client_socket:
             client_socket.close()
     except:
         pass
+
+    #Update global states and the GUI button
     client_socket = None
     connected = False
     set_connected_state(False)
 
+
+#This function sends a message to the server.
 def send_message():
     global client_socket, connected
     if not connected or client_socket is None:
         gui_log('Not connected')
         return
+    
+    #Gets the message from the GUI entry field, remove extra spaces
     msg = entry_msg.get().strip()
     if not msg:
         return
 
+    #encode_message(msg) adds CRC to the message for error detection.
     msg_crc = encode_message(msg)
+    #introduce 10% chance of error in the message to simulate corruption
     msg_crc = introduce_error(msg_crc, error_prob=0.1)
 
-    try:
+    try: #Sends the message over the TCP socket.
         client_socket.send(msg_crc.encode())
     except Exception as e:
         gui_log(f'Failed to send: {e}')
         entry_msg.delete(0, tk.END)
         return
     
+    #If successfully sent, it displays it in the sender client GUI
     gui_log(f'You: {msg}')
 
+    #Handle '[bye]' exit message to disconnect
     if msg == '[bye]':
         try:
             client_socket.close()
@@ -143,6 +173,7 @@ def send_message():
         set_connected_state(False)
 
     entry_msg.delete(0, tk.END)
+
 
 # tkinter gui
 root = tk.Tk()
