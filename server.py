@@ -1,10 +1,11 @@
+# server.py
 import socket
 import threading
 import tkinter as tk
 from tkinter import scrolledtext
 import sys
+from crc import encode_message, decode_message, introduce_error
 
-# basic server GUI/chat using same protocol as original scripts
 HOST = socket.gethostbyname(socket.gethostname())
 PORT = 1234
 
@@ -13,6 +14,7 @@ names = {}    # map socket -> name
 server_socket = None
 server_running = False
 accept_thread = None
+lock = threading.Lock()  # ensures threads don’t modify clients/names at the same time.
 
 
 def start_server(port=1234):
@@ -20,8 +22,12 @@ def start_server(port=1234):
     if server_running:
         gui_log('Server already running')
         return
+    
+    #Creates a TCP socket (AF_INET + SOCK_STREAM).
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    #SO_REUSEADDR allows quick restart without “address already in use” error.
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    
     try:
         server_socket.bind((HOST, port))
         server_socket.listen()
@@ -33,6 +39,8 @@ def start_server(port=1234):
     gui_log(f'IP Address: {HOST}')
     gui_log(f'Port: {port}')
     gui_log('Waiting for connections...\n')
+
+    #Starts a daemon thread to accept clients continuously in the background.
     accept_thread = threading.Thread(target=accept_clients, daemon=True)
     accept_thread.start()
 
@@ -43,16 +51,15 @@ def stop_server():
         gui_log('Server not running')
         return
     gui_log('[SERVER SHUTDOWN]')
-    # first notify clients with the shutdown token so they close their GUIs
-    broadcast('Server is shutting down. See you again soon!')
-    # close all client sockets
-    for c in clients[:]:
-        try:
-            c.close()
-        except:
-            pass
-    clients.clear()
-    names.clear()
+    broadcast_notice('Server is shutting down. See you again soon!')
+    with lock:
+        for c in clients[:]:
+            try:
+                c.close()
+            except:
+                pass
+        clients.clear()
+        names.clear()
     try:
         server_socket.close()
     except:
@@ -60,17 +67,56 @@ def stop_server():
     server_socket = None
     server_running = False
 
+#This function sends a string message over a TCP socket safely.
+def safe_send(conn, text):
+    try:
+        conn.send(text.encode())
+    except Exception:
+        raise
 
-def broadcast(message, sender_socket=None):
-    for client in clients[:]:
-        if client != sender_socket:
-            try:
-                client.send(message.encode())
-            except Exception:
+
+#This function sends a message to all connected clients, except optionally the sender.
+def broadcast_raw(encoded_text, sender_socket=None):
+    with lock:
+        for client in clients[:]:
+            if client != sender_socket:
                 try:
-                    clients.remove(client)
-                except ValueError:
-                    pass
+                    safe_send(client, encoded_text)
+                except Exception:
+                    try:
+                        client.close()
+                    except:
+                        pass
+                    try:
+                        clients.remove(client)
+                        if client in names:
+                            del names[client]
+                    except ValueError:
+                        pass
+
+
+
+def broadcast_notice(notice_text):
+    encoded = encode_message(notice_text)
+    broadcast_raw(encoded)
+
+
+def broadcast_with_retry(message, sender_socket=None):
+    encoded = encode_message(message)
+
+    #Simulates a 10% chance of corruption.
+    trial = introduce_error(encoded, error_prob=0.1)
+
+    #Checks if the trial message would be considered valid.
+    _, ok = decode_message(trial)
+    if ok: #valid send to all clients
+        broadcast_raw(trial, sender_socket)
+    else: #invalid/corrupted send error message and retransmit original message
+        notice = "⚠️ Error in broadcast. Rebroadcasting..."
+        gui_log(notice) 
+        notice_encoded = encode_message(notice)
+        broadcast_raw(notice_encoded)
+        broadcast_raw(encoded, sender_socket)
 
 
 def accept_clients():
@@ -80,50 +126,72 @@ def accept_clients():
             client, addr = server_socket.accept()
         except Exception:
             break
-        clients.append(client)
+        with lock:
+            clients.append(client)
         gui_log(f'[CONNECTED] {addr}')
         threading.Thread(target=handle_client, args=(client,), daemon=True).start()
 
 
 def handle_client(client):
     try:
-        name = client.recv(1024).decode()
-    except Exception:
+        raw = client.recv(4096).decode()
+        name, ok = decode_message(raw)
+        if not ok or name is None:
+            try:
+                client.send(encode_message("Invalid name CRC. Disconnecting.").encode())
+            except:
+                pass
+            try:
+                client.close()
+            except:
+                pass
+            with lock:
+                if client in clients:
+                    clients.remove(client)
+            return
+
+        with lock:
+            names[client] = name
+        gui_log(f'[NEW CONNECTION] Client {name} connected.')
+        broadcast_notice(f'Client {name} has joined the chat!')
+
+        while True:
+            incoming = client.recv(4096).decode()
+            if not incoming:
+                break
+
+            msg, ok = decode_message(incoming)
+            if not ok:
+                gui_log(f'CRC ERROR: Dropped corrupted message from {name}.')
+                try:
+                    client.send(encode_message("[CRC ERROR]: Your message was corrupted and was not delivered.").encode())
+                except:
+                    pass
+                continue
+
+            if msg == '[bye]':
+                gui_log(f'[DISCONNECTED] {name}')
+                broadcast_notice(f'Client {name} has left the chat.')
+                break
+
+            gui_log(f'{name} > {msg}')
+            broadcast_raw(encode_message(f'{name}: {msg}'), sender_socket=client)
+
+    except Exception as e:
+        pass
+    finally:
+        try:
+            with lock:
+                if client in clients:
+                    clients.remove(client)
+                if client in names:
+                    del names[client]
+        except:
+            pass
         try:
             client.close()
         except:
             pass
-        return
-    names[client] = name
-    gui_log(f'[NEW CONNECTION] Client {name} connected.')
-    broadcast(f'Client {name} has joined the chat!')
-
-    while True:
-        try:
-            msg = client.recv(1024).decode()
-            if not msg:
-                break
-            if msg == '[bye]':
-                gui_log(f'[DISCONNECTED] {name}')
-                broadcast(f'Client {name} has left the chat.')
-                break
-            gui_log(f'{name} > {msg}')
-            broadcast(f'{name}: {msg}', client)
-        except Exception:
-            break
-
-    # cleanup
-    try:
-        if client in clients:
-            clients.remove(client)
-    except ValueError:
-        pass
-    if client in names:
-        del names[client]
-    try:
-        client.close()
-    except:
-        pass
 
 
 # tkinter gui
@@ -153,7 +221,9 @@ def send_server_message():
         entry_msg.delete(0, tk.END)
         return
     gui_log(f'Server > {msg}')
-    broadcast(f'Server: {msg}')
+    # Server-originated messages are subject to the same broadcast-with-retry logic:
+    # The initial broadcast is simulated (10% chance error). If corrupted, notice and retransmit.
+    broadcast_with_retry(f'Server: {msg}')
     entry_msg.delete(0, tk.END)
 
 btn_send = tk.Button(root, text='Send', width=10, command=send_server_message)
@@ -170,6 +240,5 @@ def on_closing():
 root.protocol('WM_DELETE_WINDOW', on_closing)
 
 if __name__ == '__main__':
-    # start server automatically (optional). Keep original behavior similar: start immediately
     start_server(PORT)
     root.mainloop()

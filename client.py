@@ -1,13 +1,14 @@
+# client.py
 import socket
 import threading
 import tkinter as tk
 from tkinter import scrolledtext
+from crc import encode_message, decode_message, introduce_error
 
 PORT = 1234
 client_socket = None
 receive_thread = None
 connected = False
-
 
 def gui_log(message):
     def append():
@@ -19,7 +20,6 @@ def gui_log(message):
         root.after(0, append)
     except Exception:
         append()
-
 
 def connect_to_server():
     global client_socket, receive_thread, connected
@@ -44,20 +44,21 @@ def connect_to_server():
         gui_log(f'Connection failed: {e}')
         client_socket = None
         return
+
+    name_msg = encode_message(name)
     try:
-        client_socket.send(name.encode())
+        client_socket.send(name_msg.encode())
     except Exception as e:
         gui_log(f'Failed to send name: {e}')
         client_socket.close()
         client_socket = None
         return
+
     connected = True
     gui_log(f'Connected to {server_ip}:{port} as {name}')
-    # lock name and address fields and update button states
     set_connected_state(True)
     receive_thread = threading.Thread(target=receive_messages, daemon=True)
     receive_thread.start()
-
 
 def disconnect_from_server():
     global client_socket, connected
@@ -65,7 +66,9 @@ def disconnect_from_server():
         gui_log('Not connected')
         return
     try:
-        client_socket.send('[bye]'.encode())
+        bye_msg = encode_message('[bye]')
+        bye_msg = introduce_error(bye_msg, error_prob=0.1)
+        client_socket.send(bye_msg.encode())
     except:
         pass
     try:
@@ -77,24 +80,28 @@ def disconnect_from_server():
     gui_log('Disconnected')
     set_connected_state(False)
 
-
 def receive_messages():
     global client_socket, connected
     while connected and client_socket:
         try:
-            msg = client_socket.recv(1024).decode()
+            msg = client_socket.recv(4096).decode()
             if not msg:
                 gui_log('Disconnected from server.')
                 break
-            # if server indicates shutdown, close the GUI (accept either token or message)
-            if msg.lower().startswith('server is shutting down. see you again soon!'):
+            
+            text, ok = decode_message(msg)
+            if not ok:
+                gui_log('⚠️ Error detected in incoming message from server!')
+                continue
+
+            if text.lower().startswith('server is shutting down'):
                 gui_log('Server is shutting down...')
                 try:
                     root.after(0, root.destroy)
                 except Exception:
                     pass
                 break
-            gui_log(msg)
+            gui_log(text)
         except Exception:
             break
     try:
@@ -104,34 +111,38 @@ def receive_messages():
         pass
     client_socket = None
     connected = False
-
+    set_connected_state(False)
 
 def send_message():
-    global client_socket
-    global connected
+    global client_socket, connected
     if not connected or client_socket is None:
         gui_log('Not connected')
         return
     msg = entry_msg.get().strip()
     if not msg:
         return
+
+    msg_crc = encode_message(msg)
+    msg_crc = introduce_error(msg_crc, error_prob=0.1)
+
     try:
-        client_socket.send(msg.encode())
-        # show own message locally
-        if msg == '[bye]':
-            try:
-                client_socket.close()
-            except:
-                pass
-            gui_log('You left the chat')
-            connected = False
-            set_connected_state(False)
-        else:
-            gui_log(f'You: {msg}')
+        client_socket.send(msg_crc.encode())
     except Exception as e:
         gui_log(f'Failed to send: {e}')
-    entry_msg.delete(0, tk.END)
+        entry_msg.delete(0, tk.END)
+        return
+    
+    gui_log(f'You: {msg}')
 
+    if msg == '[bye]':
+        try:
+            client_socket.close()
+        except:
+            pass
+        connected = False
+        set_connected_state(False)
+
+    entry_msg.delete(0, tk.END)
 
 # tkinter gui
 root = tk.Tk()
@@ -171,7 +182,6 @@ entry_msg.grid(row=0, column=0)
 btn_send = tk.Button(frame_bottom, text='Send', width=10, command=send_message)
 btn_send.grid(row=0, column=1, padx=6)
 
-
 def set_connected_state(is_connected):
     # button and field state changes must run in main thread
     def apply():
@@ -197,7 +207,6 @@ def set_connected_state(is_connected):
         root.after(0, apply)
     except Exception:
         apply()
-
 
 def on_closing():
     disconnect_from_server()
