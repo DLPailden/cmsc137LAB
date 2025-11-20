@@ -10,6 +10,7 @@ client_socket = None
 receive_thread = None
 connected = False
 
+# display text in window
 def gui_log(message):
     def append():
         txt.configure(state='normal')
@@ -32,12 +33,15 @@ def connect_to_server():
     if not server_ip or not name:
         gui_log('Server IP and Name required')
         return
+    # convert to integer if not already
     try:
         port = int(port_text) if port_text else PORT
     except ValueError:
         gui_log('Port must be a number')
         return
+    # create tcp socket object
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # establish connection
     try:
         client_socket.connect((server_ip, port))
     except Exception as e:
@@ -45,6 +49,7 @@ def connect_to_server():
         client_socket = None
         return
 
+    # appends CRC bits to the username string and encdoded to send to server
     name_msg = encode_message(name)
     try:
         client_socket.send(name_msg.encode())
@@ -57,6 +62,7 @@ def connect_to_server():
     connected = True
     gui_log(f'Connected to {server_ip}:{port} as {name}')
     set_connected_state(True)
+    # create a background thread for listening for incoming messages from the server
     receive_thread = threading.Thread(target=receive_messages, daemon=True)
     receive_thread.start()
 
@@ -67,7 +73,6 @@ def disconnect_from_server():
         return
     try:
         bye_msg = encode_message('[bye]')
-        bye_msg = introduce_error(bye_msg, error_prob=0.1)
         client_socket.send(bye_msg.encode())
     except:
         pass
@@ -84,6 +89,7 @@ def receive_messages():
     global client_socket, connected
     while connected and client_socket:
         try:
+            # read up to 4096 bytes from the server
             msg = client_socket.recv(4096).decode()
             if not msg:
                 gui_log('Disconnected from server.')
@@ -91,7 +97,7 @@ def receive_messages():
             
             text, ok = decode_message(msg)
             if not ok:
-                gui_log('⚠️ Error detected in incoming message from server!')
+                gui_log('[CRC ERROR] Error detected in incoming message from server!')
                 continue
 
             if text.lower().startswith('server is shutting down'):
@@ -101,6 +107,7 @@ def receive_messages():
                 except Exception:
                     pass
                 break
+            # display crc-verified message
             gui_log(text)
         except Exception:
             break
@@ -145,21 +152,26 @@ def send_message():
     entry_msg.delete(0, tk.END)
 
 # tkinter gui
+# client window
 root = tk.Tk()
 root.title('Chat Client')
 
+# connection input fields
 frame_top = tk.Frame(root)
 frame_top.grid(row=0, column=0, padx=8, pady=8)
 
+# server IP input field
 tk.Label(frame_top, text='Server IP:').grid(row=0, column=0)
 entry_ip = tk.Entry(frame_top, width=15)
 entry_ip.grid(row=0, column=1)
 
+# port input field w/ default value
 tk.Label(frame_top, text='Port:').grid(row=0, column=2)
 entry_port = tk.Entry(frame_top, width=6)
 entry_port.grid(row=0, column=3)
 entry_port.insert(0, str(PORT))
 
+# name imput field
 tk.Label(frame_top, text='Your Name:').grid(row=0, column=4)
 entry_name = tk.Entry(frame_top, width=15)
 entry_name.grid(row=0, column=5)
@@ -170,15 +182,18 @@ btn_connect.grid(row=0, column=6, padx=6)
 btn_disconnect = tk.Button(frame_top, text='Disconnect', width=10, command=disconnect_from_server)
 btn_disconnect.grid(row=0, column=7)
 
+# a scrollable text box where chat messages will appear
 txt = scrolledtext.ScrolledText(root, state='disabled', width=60, height=20)
 txt.grid(row=1, column=0, padx=8, pady=4)
 
 frame_bottom = tk.Frame(root)
 frame_bottom.grid(row=2, column=0, padx=8, pady=4)
 
+# input message field
 entry_msg = tk.Entry(frame_bottom, width=50)
 entry_msg.grid(row=0, column=0)
 
+# send button
 btn_send = tk.Button(frame_bottom, text='Send', width=10, command=send_message)
 btn_send.grid(row=0, column=1, padx=6)
 

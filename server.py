@@ -1,4 +1,3 @@
-# server.py
 import socket
 import threading
 import tkinter as tk
@@ -23,9 +22,9 @@ def start_server(port=1234):
         gui_log('Server already running')
         return
     
-    #Creates a TCP socket (AF_INET + SOCK_STREAM).
+    #Creating the main listening socket that clients will connect to
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    #SO_REUSEADDR allows quick restart without “address already in use” error.
+    #Allows the OS to reuse the port immediately after the server closes..
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     
     try:
@@ -34,6 +33,7 @@ def start_server(port=1234):
     except Exception as e:
         gui_log(f'Failed to start server: {e}')
         return
+    
     server_running = True
     gui_log(f'Server started successfully! Server running on {HOST}:{port}')
     gui_log(f'IP Address: {HOST}')
@@ -67,6 +67,7 @@ def stop_server():
     server_socket = None
     server_running = False
 
+
 #This function sends a string message over a TCP socket safely.
 def safe_send(conn, text):
     try:
@@ -82,6 +83,7 @@ def broadcast_raw(encoded_text, sender_socket=None):
             if client != sender_socket:
                 try:
                     safe_send(client, encoded_text)
+
                 except Exception:
                     try:
                         client.close()
@@ -112,7 +114,7 @@ def broadcast_with_retry(message, sender_socket=None):
     if ok: #valid send to all clients
         broadcast_raw(trial, sender_socket)
     else: #invalid/corrupted send error message and retransmit original message
-        notice = "⚠️ Error in broadcast. Rebroadcasting..."
+        notice = "[CRC ERROR]: Error in broadcast. Rebroadcasting..."
         gui_log(notice) 
         notice_encoded = encode_message(notice)
         broadcast_raw(notice_encoded)
@@ -132,10 +134,12 @@ def accept_clients():
         threading.Thread(target=handle_client, args=(client,), daemon=True).start()
 
 
+#This function handles communication with a client.
 def handle_client(client):
     try:
         raw = client.recv(4096).decode()
         name, ok = decode_message(raw)
+
         if not ok or name is None:
             try:
                 client.send(encode_message("Invalid name CRC. Disconnecting.").encode())
@@ -150,8 +154,10 @@ def handle_client(client):
                     clients.remove(client)
             return
 
+        #Add the client to the names dictionary
         with lock:
             names[client] = name
+        #Log the new connection in the GUI and broadcast to all clients
         gui_log(f'[NEW CONNECTION] Client {name} connected.')
         broadcast_notice(f'Client {name} has joined the chat!')
 
@@ -160,26 +166,35 @@ def handle_client(client):
             if not incoming:
                 break
 
+            #decode the incoming client message to check for crc validity
             msg, ok = decode_message(incoming)
+
+            #CORRUPTED/INVALID:
             if not ok:
-                gui_log(f'CRC ERROR: Dropped corrupted message from {name}.')
+                #Display the CRC error in the server GUI.
+                gui_log(f'[CRC ERROR]: Dropped corrupted message from {name}.')
                 try:
+                    #Display in the client GUI that their message was not delivered.
                     client.send(encode_message("[CRC ERROR]: Your message was corrupted and was not delivered.").encode())
                 except:
                     pass
+                #Does not broadcast this message.
                 continue
-
+            
+            #To handle the [bye] exit message
             if msg == '[bye]':
                 gui_log(f'[DISCONNECTED] {name}')
                 broadcast_notice(f'Client {name} has left the chat.')
                 break
 
+            #NOT CORRUPTED/VALID: Logs the message in the server GUI in the format
             gui_log(f'{name} > {msg}')
+            #Broadcasts it to all other clients using
             broadcast_raw(encode_message(f'{name}: {msg}'), sender_socket=client)
 
     except Exception as e:
         pass
-    finally:
+    finally: #cleanup if connection crash or client disconnects
         try:
             with lock:
                 if client in clients:
@@ -214,15 +229,16 @@ def send_server_message():
     msg = entry_msg.get().strip()
     if not msg:
         return
-    # treat typing the special token '[bye]' as a shutdown request
+    # o handle the [bye] as a shutdown request
     if msg == '[bye]':
         gui_log('[SERVER SHUTDOWN] (requested)')
         stop_server()
         entry_msg.delete(0, tk.END)
         return
+    
     gui_log(f'Server > {msg}')
-    # Server-originated messages are subject to the same broadcast-with-retry logic:
-    # The initial broadcast is simulated (10% chance error). If corrupted, notice and retransmit.
+    # Messages typed from the server uses broadcast_with_retry to simulate possible corruption:
+    # The initial broadcast is simulated (10% chance error). If corrupted, send error message and rebroadcast.
     broadcast_with_retry(f'Server: {msg}')
     entry_msg.delete(0, tk.END)
 
